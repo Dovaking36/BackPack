@@ -12,7 +12,7 @@
 from typing import List, Tuple, Optional
 
 # Импорт моделей (предполагается, что models.py описывает Container, Box)
-from models import Container, Box
+from box_packer.models import Container, Box
 
 
 def get_rotated_dimensions(box: Box, rotation: str) -> Tuple[float, float, float]:
