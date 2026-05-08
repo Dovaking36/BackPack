@@ -17,6 +17,9 @@ Position = Tuple[float, float, float]
 # 1. Модель контейнера (входные данные)
 # ------------------------------------------------------------------
 class Container(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"id": "V1", "width": 120.0, "depth": 80.0, "height": 100.0}
+    })
     id: str = Field(..., description="Уникальный идентификатор контейнера, например 'V1'")
     width: float = Field(..., gt=0, description="Ширина, см")
     depth: float = Field(..., gt=0, description="Глубина, см")

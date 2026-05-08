@@ -1,3 +1,4 @@
+# box_packer/solver.py
 """
 Решатель задачи упаковки коробок в контейнеры.
 
@@ -11,15 +12,9 @@
 
 from typing import List, Dict, Tuple, Optional, Any
 import copy
-import math
 
-from models import Container, Box, Order, PackingResult, ContainerUsage, Placement, Rotation, SolverConfig
-from constraints import (
-    get_rotated_dimensions,
-    check_stack_layer_limit,
-    check_light_on_heavy,
-    boxes_overlap  # для проверки пересечений в слое
-)
+from box_packer.models import Container, Box, Order, PackingResult, ContainerUsage, Placement, Rotation, SolverConfig
+from box_packer.constraints import get_rotated_dimensions, check_stack_layer_limit
 
 
 class PackingSolver:
@@ -89,7 +84,7 @@ class PackingSolver:
 
         # Результат
         containers_used = []
-        unplaced = []  # список (box, почему не поместилась)
+        unplaced_boxes_list = []
         current_box_index = 0
 
         # Перебираем контейнеры по порядку (приоритет = индекс в списке)
@@ -105,7 +100,6 @@ class PackingSolver:
             if packed_boxes:
                 # Формируем информацию о размещении
                 container_fill_ratio = sum(b.volume for b in packed_boxes) / container.volume
-                # Преобразуем packed_info в список Placement
                 placements = []
                 for info in packed_info:
                     placements.append(Placement(
@@ -136,8 +130,9 @@ class PackingSolver:
         unplaced_list = [{k: v} for k, v in unplaced_dict.items()]
 
         feasible = (len(unplaced_boxes) == 0)
-        total_fill_ratio = sum(cu.fill_ratio * (self.containers[i].volume / sum(c.volume for c in self.containers))
-                               for i, cu in enumerate(containers_used)) if containers_used else 0.0
+        total_volume = sum(c.volume for c in self.containers)
+        total_fill_ratio = sum(cu.fill_ratio * (self.containers[i].volume / total_volume)
+                               for i, cu in enumerate(containers_used)) if total_volume > 0 else 0.0
 
         warnings = []
         if not feasible:
@@ -170,8 +165,8 @@ class PackingSolver:
         """
         # Структура слоёв: каждый слой имеет:
         # - z (высота нижней границы)
-        # - высоту слоя (определяется максимальной высотой коробки в слое)
-        # - список размещённых коробок с их координатами (x, y, width, depth, box, rotation)
+        # - height (высота слоя)
+        # - items: list of (box, x, y, width, depth, rotation)
         layers = []
 
         packed_boxes = []
@@ -185,24 +180,25 @@ class PackingSolver:
                 if not check_stack_layer_limit(box, layer_idx):
                     continue
 
-                # Проверяем, можно ли поставить лёгкую на тяжёлый слой (если слой содержит тяжёлые коробки)
+                # Проверяем, можно ли поставить лёгкую на тяжёлый слой
                 if not allow_light_on_heavy and box.max_stack_layers is None:
                     # Новая коробка лёгкая – смотрим, есть ли в этом слое тяжёлые
-                    if any(b.max_stack_layers is not None for (b, _, _, _, _) in layer['items']):
-                        continue  # Нельзя лёгкую на слой с тяжёлыми
+                    if any(b.max_stack_layers is not None for (b, _, _, _, _, _) in layer['items']):
+                        continue
 
                 # Пытаемся разместить на свободном месте в слое
                 position, rotation = self._find_position_in_layer(layer, box, container, self.config.use_rotation)
                 if position is not None:
-                    # Размещаем
-                    w, d, h = get_rotated_dimensions(box, rotation)
-                    layer['items'].append((box, position[0], position[1], w, d, rotation))
+                    w, d, _ = get_rotated_dimensions(box, rotation)
+                    x, y = position
+                    # Добавляем в слой
+                    layer['items'].append((box, x, y, w, d, rotation))
                     packed_boxes.append(box)
                     packed_info.append({
                         'box': box,
                         'quantity': 1,
                         'layer': layer_idx,
-                        'position': (position[0], position[1], layer['z']),
+                        'position': (x, y, layer['z']),
                         'rotation': rotation
                     })
                     placed = True
@@ -211,47 +207,40 @@ class PackingSolver:
             if not placed:
                 # Пытаемся создать новый слой
                 new_layer_z = sum(l['height'] for l in layers) if layers else 0.0
-                # Высота нового слоя = высота коробки (вместе с поворотом)
-                _, _, h = get_rotated_dimensions(box, '0') if not self.config.use_rotation else (
-                    get_rotated_dimensions(box, '0') + get_rotated_dimensions(box, '90')
-                )
-                # На самом деле высота коробки не зависит от поворота, т.к. высота не меняется.
-                h = box.height
+                h = box.height  # высота коробки (независимо от поворота)
                 if new_layer_z + h <= container.height + 1e-9:
-                    # Проверяем ограничение по слоям для новой коробки
+                    # Проверка ограничения по слоям для новой коробки
                     new_layer_number = len(layers) + 1
-                    if check_stack_layer_limit(box, new_layer_number):
-                        # Проверяем, не нарушится ли правило "лёгкая на тяжёлый слой" (новый слой будет над существующими)
-                        # Если под новым слоем есть тяжёлые коробки, а новая лёгкая – запрещено
-                        if not allow_light_on_heavy and box.max_stack_layers is None:
-                            # Проверяем, есть ли тяжёлые коробки в любом из нижних слоёв
-                            heavy_below = any(
-                                any(b2.max_stack_layers is not None for (b2, _, _, _, _, _) in layer['items'])
-                                for layer in layers
-                            )
-                            if heavy_below:
-                                placed = False
-                                continue
-                        # Создаём новый слой
-                        new_layer = {
-                            'z': new_layer_z,
-                            'height': h,
-                            'items': []  # (box, x, y, width, depth, rotation)
-                        }
-                        # Размещаем коробку в начале слоя (0,0)
-                        w, d, _ = get_rotated_dimensions(box, '0')
-                        new_layer['items'].append((box, 0.0, 0.0, w, d, '0'))
-                        layers.append(new_layer)
-                        packed_boxes.append(box)
-                        packed_info.append({
-                            'box': box,
-                            'quantity': 1,
-                            'layer': new_layer_number,
-                            'position': (0.0, 0.0, new_layer_z),
-                            'rotation': '0'
-                        })
-                        placed = True
-                # Если не помещается по высоте – не размещаем
+                    if not check_stack_layer_limit(box, new_layer_number):
+                        continue
+                    # Проверка правила "лёгкая на тяжёлом слое"
+                    if not allow_light_on_heavy and box.max_stack_layers is None:
+                        # Если под новым слоем есть хотя бы один слой с тяжёлыми коробками – запрещено
+                        heavy_below = any(
+                            any(b2.max_stack_layers is not None for (b2, _, _, _, _, _) in l['items'])
+                            for l in layers
+                        )
+                        if heavy_below:
+                            continue
+                    # Создаём новый слой
+                    new_layer = {
+                        'z': new_layer_z,
+                        'height': h,
+                        'items': []
+                    }
+                    # Размещаем коробку в начале слоя (0,0)
+                    w, d, _ = get_rotated_dimensions(box, '0')
+                    new_layer['items'].append((box, 0.0, 0.0, w, d, '0'))
+                    layers.append(new_layer)
+                    packed_boxes.append(box)
+                    packed_info.append({
+                        'box': box,
+                        'quantity': 1,
+                        'layer': new_layer_number,
+                        'position': (0.0, 0.0, new_layer_z),
+                        'rotation': '0'
+                    })
+                    placed = True
 
         return packed_boxes, packed_info
 
@@ -285,26 +274,23 @@ class PackingSolver:
         for rot in rotations:
             w, d, _ = get_rotated_dimensions(box, rot)
             # Собираем все потенциальные координаты x, y на основе существующих коробок
-            # Простейший вариант: перебираем все возможные x от 0 до container.width - w с шагом, но это долго.
-            # Более эффективно: собираем "точки привязки" – правые границы коробок и левую границу 0.
             x_candidates = {0.0}
             y_candidates = {0.0}
-            for (_, x, y, bw, bd, _) in layer['items']:
-                x_candidates.add(x + bw)  # правая граница
-                y_candidates.add(y + bd)  # верхняя граница
-
-            # Сортируем кандидатов
+            for (_, ox, oy, ow, od, _) in layer['items']:
+                x_candidates.add(ox + ow)  # правая граница
+                y_candidates.add(oy + od)  # верхняя граница
+                # Также добавляем левую и нижнюю? Для простоты достаточно правых/верхних,
+                # так как начало координат уже есть.
             x_list = sorted(x_candidates)
             y_list = sorted(y_candidates)
 
-            # Перебираем позиции
             for x in x_list:
                 if x + w > container.width + 1e-9:
                     continue
                 for y in y_list:
                     if y + d > container.depth + 1e-9:
                         continue
-                    # Проверяем, не пересекается ли с другими коробками в слое
+                    # Проверяем перекрытие с уже размещёнными
                     overlap = False
                     for (_, ox, oy, ow, od, _) in layer['items']:
                         if not (x + w <= ox + 1e-9 or x >= ox + ow - 1e-9 or
@@ -342,21 +328,19 @@ class PackingSolver:
         # Текущий заказ копируем
         current_order = dict(max_items)
 
-        # Функция для проверки, достигнут ли порог fill_threshold
         def meets_threshold(res: PackingResult) -> bool:
-            return res.feasible and res.total_fill_ratio >= self.fill_threshold
+            return res.feasible and res.total_fill_ratio >= self.fill_threshold - 1e-6
 
         # Пробуем исходный заказ
         result = self.check_order(current_order)
         if meets_threshold(result):
             return result
 
-        # Если не влезает, уменьшаем количество коробок (жадно, по одному)
-        # Сортируем типы коробок по убыванию "важности" (например, по объёму)
+        # Если не влезает, уменьшаем количество коробок (жадно)
+        # Сортируем типы коробок по убыванию объёма
         box_volumes = {bid: self.box_types[bid].volume for bid in max_items}
         sorted_boxes = sorted(max_items.keys(), key=lambda bid: box_volumes[bid], reverse=True)
 
-        # Пока не достигли порога и есть что уменьшать
         improved = True
         while not meets_threshold(result) and improved:
             improved = False
@@ -369,15 +353,13 @@ class PackingSolver:
                     if new_result.feasible and new_result.total_fill_ratio > result.total_fill_ratio:
                         result = new_result
                         improved = True
-                        break  # начнём заново с новым результатом
+                        break
                     else:
                         # откатываем
                         current_order[box_id] += 1
 
-        # Если ничего не улучшилось, возвращаем последний feasible (или worst)
         if result.feasible:
             return result
         else:
-            # Возвращаем результат с предупреждением, что порог не достигнут
             result.warnings.append(f"Не удалось достичь fill_threshold {self.fill_threshold}")
             return result
