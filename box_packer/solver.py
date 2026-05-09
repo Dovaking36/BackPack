@@ -1,43 +1,20 @@
-# box_packer/solver.py
 """
 Решатель задачи упаковки коробок в контейнеры.
-
-Использует эвристический алгоритм:
-- Сортировка коробок по убыванию объёма (First-Fit Decreasing).
-- Упаковка в контейнеры последовательно (по приоритету из списка).
-- Внутри контейнера – размещение по слоям (2D упаковка на каждом слое).
-- Поддержка поворотов коробок в горизонтальной плоскости.
-- Проверка ограничений: максимальное количество слоёв, лёгкие на тяжёлых.
 """
-
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional
 import copy
-
 from box_packer.models import Container, Box, Order, PackingResult, ContainerUsage, Placement, Rotation, SolverConfig
 from box_packer.constraints import get_rotated_dimensions, check_stack_layer_limit
 
 
 class PackingSolver:
-    """
-    Решатель задачи упаковки коробок.
-    """
-
     def __init__(
-        self,
-        containers: List[dict],
-        boxes: List[dict],
-        fill_threshold: float = 0.9,
-        **kwargs
+            self,
+            containers: List[dict],
+            boxes: List[dict],
+            fill_threshold: float = 0.9,
+            **kwargs
     ):
-        """
-        Инициализация решателя.
-
-        Args:
-            containers: Список словарей с описанием контейнеров.
-            boxes: Список словарей с описанием типов коробок.
-            fill_threshold: Целевой коэффициент заполнения (0..1).
-            **kwargs: Дополнительные параметры (allow_light_on_heavy, use_rotation, algorithm и т.д.)
-        """
         self.containers = [Container(**c) for c in containers]
         self.box_types = {b['id']: Box(**b) for b in boxes}
         self.fill_threshold = fill_threshold
@@ -50,16 +27,6 @@ class PackingSolver:
         )
 
     def check_order(self, order: Dict[str, int]) -> PackingResult:
-        """
-        Проверить, помещается ли заказ в доступные контейнеры.
-
-        Args:
-            order: Словарь {box_id: количество_изделий}.
-
-        Returns:
-            PackingResult с деталями размещения.
-        """
-        # Преобразуем количество изделий в количество коробок
         try:
             order_obj = Order(items=order)
             boxes_needed = order_obj.to_boxes_count(self.box_types)
@@ -72,33 +39,26 @@ class PackingSolver:
                 warnings=[f"Ошибка в заказе: {e}"]
             )
 
-        # Создаём список всех коробок для упаковки (с повторениями)
         all_boxes = []
         for box_id, qty in boxes_needed.items():
             box = self.box_types[box_id]
             for _ in range(qty):
                 all_boxes.append(copy.deepcopy(box))
 
-        # Сортируем по убыванию объёма (FFD)
         all_boxes.sort(key=lambda b: b.volume, reverse=True)
 
-        # Результат
         containers_used = []
-        unplaced_boxes_list = []
         current_box_index = 0
 
-        # Перебираем контейнеры по порядку (приоритет = индекс в списке)
         for container in self.containers:
             if current_box_index >= len(all_boxes):
                 break
 
-            # Пытаемся упаковать оставшиеся коробки в этот контейнер
             packed_boxes, packed_info = self._pack_into_container(
                 container, all_boxes[current_box_index:], self.config.allow_light_on_heavy
             )
 
             if packed_boxes:
-                # Формируем информацию о размещении
                 container_fill_ratio = sum(b.volume for b in packed_boxes) / container.volume
                 placements = []
                 for info in packed_info:
@@ -115,14 +75,10 @@ class PackingSolver:
                     fill_ratio=container_fill_ratio,
                     placements=placements
                 ))
-
-                # Продвигаем индекс
                 current_box_index += len(packed_boxes)
             else:
-                # Ни одной коробки не упаковано – этот контейнер бесполезен, переходим к следующему
                 continue
 
-        # Определяем, какие коробки не упакованы
         unplaced_boxes = all_boxes[current_box_index:]
         unplaced_dict = {}
         for box in unplaced_boxes:
@@ -130,9 +86,13 @@ class PackingSolver:
         unplaced_list = [{k: v} for k, v in unplaced_dict.items()]
 
         feasible = (len(unplaced_boxes) == 0)
-        total_volume = sum(c.volume for c in self.containers)
-        total_fill_ratio = sum(cu.fill_ratio * (self.containers[i].volume / total_volume)
-                               for i, cu in enumerate(containers_used)) if total_volume > 0 else 0.0
+
+        # ИСПРАВЛЕНИЕ: считаем заполненность только по ИСПОЛЬЗОВАННЫМ контейнерам
+        used_containers_ids = {cu.container_id for cu in containers_used}
+        used_volume = sum(c.volume for c in self.containers if c.id in used_containers_ids)
+        packed_volume = sum(b.volume for b in all_boxes[:current_box_index])
+
+        total_fill_ratio = (packed_volume / used_volume) if used_volume > 0 else 0.0
 
         warnings = []
         if not feasible:
@@ -147,140 +107,105 @@ class PackingSolver:
         )
 
     def _pack_into_container(
-        self,
-        container: Container,
-        boxes: List[Box],
-        allow_light_on_heavy: bool
+            self,
+            container: Container,
+            boxes: List[Box],
+            allow_light_on_heavy: bool
     ) -> Tuple[List[Box], List[dict]]:
-        """
-        Упаковывает коробки в один контейнер, используя слоевой алгоритм.
-
-        Args:
-            container: Контейнер.
-            boxes: Список коробок (уже отсортированных по убыванию объёма).
-            allow_light_on_heavy: Разрешить лёгкие на тяжёлых.
-
-        Returns:
-            (список упакованных коробок, список информации о каждой упакованной группе)
-        """
-        # Структура слоёв: каждый слой имеет:
-        # - z (высота нижней границы)
-        # - height (высота слоя)
-        # - items: list of (box, x, y, width, depth, rotation)
         layers = []
-
         packed_boxes = []
         packed_info = []
 
         for box in boxes:
-            placed = False
-            # Пробуем разместить в существующих слоях
+            # 1. Попытка разместить в существующих слоях
             for layer_idx, layer in enumerate(layers, start=1):
-                # Проверяем ограничение по слоям для этой коробки
                 if not check_stack_layer_limit(box, layer_idx):
                     continue
-
-                # Проверяем, можно ли поставить лёгкую на тяжёлый слой
                 if not allow_light_on_heavy and box.max_stack_layers is None:
-                    # Новая коробка лёгкая – смотрим, есть ли в этом слое тяжёлые
                     if any(b.max_stack_layers is not None for (b, _, _, _, _, _) in layer['items']):
                         continue
 
-                # Пытаемся разместить на свободном месте в слое
-                position, rotation = self._find_position_in_layer(layer, box, container, self.config.use_rotation)
+                position, rotation = self._find_position_in_layer(
+                    layer, box, container, self.config.use_rotation
+                )
                 if position is not None:
                     w, d, _ = get_rotated_dimensions(box, rotation)
                     x, y = position
-                    # Добавляем в слой
                     layer['items'].append((box, x, y, w, d, rotation))
                     packed_boxes.append(box)
                     packed_info.append({
-                        'box': box,
-                        'quantity': 1,
-                        'layer': layer_idx,
-                        'position': (x, y, layer['z']),
-                        'rotation': rotation
+                        'box': box, 'quantity': 1, 'layer': layer_idx,
+                        'position': (x, y, layer['z']), 'rotation': rotation
                     })
-                    placed = True
-                    break
-
-            if not placed:
-                # Пытаемся создать новый слой
+                    break  # Коробка успешно размещена → переходим к следующей
+            else:
+                # 2. Блок else выполняется ТОЛЬКО если цикл выше завершился без break
+                # (т.е. коробка не влезла ни в один существующий слой)
                 new_layer_z = sum(l['height'] for l in layers) if layers else 0.0
-                h = box.height  # высота коробки (независимо от поворота)
-                if new_layer_z + h <= container.height + 1e-9:
-                    # Проверка ограничения по слоям для новой коробки
-                    new_layer_number = len(layers) + 1
-                    if not check_stack_layer_limit(box, new_layer_number):
+                h = box.height
+
+                if new_layer_z + h > container.height + 1e-9:
+                    continue  # Не хватает высоты в контейнере
+
+                new_layer_number = len(layers) + 1
+                if not check_stack_layer_limit(box, new_layer_number):
+                    continue
+
+                if not allow_light_on_heavy and box.max_stack_layers is None:
+                    heavy_below = any(
+                        any(b2.max_stack_layers is not None for (b2, _, _, _, _, _) in l['items'])
+                        for l in layers
+                    )
+                    if heavy_below:
                         continue
-                    # Проверка правила "лёгкая на тяжёлом слое"
-                    if not allow_light_on_heavy and box.max_stack_layers is None:
-                        # Если под новым слоем есть хотя бы один слой с тяжёлыми коробками – запрещено
-                        heavy_below = any(
-                            any(b2.max_stack_layers is not None for (b2, _, _, _, _, _) in l['items'])
-                            for l in layers
-                        )
-                        if heavy_below:
-                            continue
-                    # Создаём новый слой
-                    new_layer = {
-                        'z': new_layer_z,
-                        'height': h,
-                        'items': []
-                    }
-                    # Размещаем коробку в начале слоя (0,0)
-                    w, d, _ = get_rotated_dimensions(box, '0')
-                    new_layer['items'].append((box, 0.0, 0.0, w, d, '0'))
-                    layers.append(new_layer)
-                    packed_boxes.append(box)
-                    packed_info.append({
-                        'box': box,
-                        'quantity': 1,
-                        'layer': new_layer_number,
-                        'position': (0.0, 0.0, new_layer_z),
-                        'rotation': '0'
-                    })
-                    placed = True
+
+                # Определяем допустимый поворот inline
+                w0, d0, _ = get_rotated_dimensions(box, '0')
+                w90, d90, _ = get_rotated_dimensions(box, '90')
+
+                rotation = None
+                if w0 <= container.width + 1e-9 and d0 <= container.depth + 1e-9:
+                    rotation, w, d = '0', w0, d0
+                elif self.config.use_rotation and w90 <= container.width + 1e-9 and d90 <= container.depth + 1e-9:
+                    rotation, w, d = '90', w90, d90
+
+                if rotation is None:
+                    continue  # Коробка физически не помещается в контейнер ни в одном повороте
+
+                # Создаём новый слой и сразу размещаем первую коробку
+                new_layer = {
+                    'z': new_layer_z,
+                    'height': h,
+                    'items': [(box, 0.0, 0.0, w, d, rotation)]
+                }
+                layers.append(new_layer)
+                packed_boxes.append(box)
+                packed_info.append({
+                    'box': box, 'quantity': 1, 'layer': new_layer_number,
+                    'position': (0.0, 0.0, new_layer_z), 'rotation': rotation
+                })
 
         return packed_boxes, packed_info
 
     def _find_position_in_layer(
-        self,
-        layer: dict,
-        box: Box,
-        container: Container,
-        use_rotation: bool
+            self,
+            layer: dict,
+            box: Box,
+            container: Container,
+            use_rotation: bool
     ) -> Tuple[Optional[Tuple[float, float]], Optional[str]]:
-        """
-        Ищет свободное место в слое для коробки (2D упаковка).
-
-        Используется простой эвристический поиск: перебираем возможные позиции
-        вдоль правых и верхних границ уже уложенных коробок + начало координат.
-
-        Args:
-            layer: Словарь слоя с ключом 'items'.
-            box: Коробка.
-            container: Контейнер (нужен для границ по ширине и глубине).
-            use_rotation: Разрешать ли поворот.
-
-        Returns:
-            ( (x, y), rotation ) или (None, None), если место не найдено.
-        """
-        # Генерируем возможные повороты
         rotations = ['0']
         if use_rotation:
             rotations.append('90')
 
         for rot in rotations:
             w, d, _ = get_rotated_dimensions(box, rot)
-            # Собираем все потенциальные координаты x, y на основе существующих коробок
             x_candidates = {0.0}
             y_candidates = {0.0}
             for (_, ox, oy, ow, od, _) in layer['items']:
-                x_candidates.add(ox + ow)  # правая граница
-                y_candidates.add(oy + od)  # верхняя граница
-                # Также добавляем левую и нижнюю? Для простоты достаточно правых/верхних,
-                # так как начало координат уже есть.
+                x_candidates.add(ox + ow)
+                y_candidates.add(oy + od)
+
             x_list = sorted(x_candidates)
             y_list = sorted(y_candidates)
 
@@ -290,7 +215,7 @@ class PackingSolver:
                 for y in y_list:
                     if y + d > container.depth + 1e-9:
                         continue
-                    # Проверяем перекрытие с уже размещёнными
+
                     overlap = False
                     for (_, ox, oy, ow, od, _) in layer['items']:
                         if not (x + w <= ox + 1e-9 or x >= ox + ow - 1e-9 or
@@ -302,64 +227,42 @@ class PackingSolver:
         return None, None
 
     def optimize(self, max_items: Dict[str, int]) -> PackingResult:
-        """
-        Находит оптимальное количество изделий для достижения fill_threshold.
-
-        Простая эвристика: пытаемся упаковать max_items, если не влезает,
-        уменьшаем количество по одному (по очереди) до тех пор, пока не станет feasible и fill_ratio >= threshold.
-
-        Args:
-            max_items: Словарь {box_id: максимальное количество изделий}.
-
-        Returns:
-            PackingResult для найденного заказа.
-        """
-        # Проверяем, что все box_id существуют
         for box_id in max_items:
             if box_id not in self.box_types:
                 return PackingResult(
-                    feasible=False,
-                    containers_used=[],
-                    unplaced_boxes=[{box_id: max_items[box_id]}],
-                    total_fill_ratio=0.0,
-                    warnings=[f"Неизвестный тип коробки {box_id}"]
+                    feasible=False, containers_used=[], unplaced_boxes=[{box_id: max_items[box_id]}],
+                    total_fill_ratio=0.0, warnings=[f"Неизвестный тип коробки {box_id}"]
                 )
 
-        # Текущий заказ копируем
         current_order = dict(max_items)
 
-        def meets_threshold(res: PackingResult) -> bool:
-            return res.feasible and res.total_fill_ratio >= self.fill_threshold - 1e-6
-
-        # Пробуем исходный заказ
         result = self.check_order(current_order)
-        if meets_threshold(result):
+        if result.feasible and result.total_fill_ratio >= self.fill_threshold - 1e-6:
             return result
 
-        # Если не влезает, уменьшаем количество коробок (жадно)
-        # Сортируем типы коробок по убыванию объёма
-        box_volumes = {bid: self.box_types[bid].volume for bid in max_items}
-        sorted_boxes = sorted(max_items.keys(), key=lambda bid: box_volumes[bid], reverse=True)
-
-        improved = True
-        while not meets_threshold(result) and improved:
-            improved = False
+        # Жадно уменьшаем заказ только до достижения feasible=True
+        sorted_boxes = sorted(max_items.keys(), key=lambda bid: self.box_types[bid].volume, reverse=True)
+        reduced = True
+        while not result.feasible and reduced:
+            reduced = False
             for box_id in sorted_boxes:
-                if current_order[box_id] > 0:
+                if current_order.get(box_id, 0) > 0:
                     current_order[box_id] -= 1
-                    new_result = self.check_order(current_order)
-                    if meets_threshold(new_result):
-                        return new_result
-                    if new_result.feasible and new_result.total_fill_ratio > result.total_fill_ratio:
-                        result = new_result
-                        improved = True
+                    result = self.check_order(current_order)
+                    reduced = True
+                    if result.feasible:
                         break
-                    else:
-                        # откатываем
-                        current_order[box_id] += 1
 
-        if result.feasible:
+        if not result.feasible:
+            result = result.model_copy(update={
+                "warnings": list(result.warnings) + ["Не удалось разместить заказ. Проверьте габариты коробок."]
+            })
             return result
-        else:
-            result.warnings.append(f"Не удалось достичь fill_threshold {self.fill_threshold}")
-            return result
+
+        if result.total_fill_ratio < self.fill_threshold - 1e-6:
+            result = result.model_copy(update={
+                "warnings": list(result.warnings) + [
+                    f"Заказ размещён, но fill_ratio {result.total_fill_ratio:.2f} < порога {self.fill_threshold}"
+                ]
+            })
+        return result

@@ -1,11 +1,12 @@
-
-
-
+"""
+Эталонные данные для тестирования.
+"""
+# Контейнеры
 V1 = {'id': 'V1', 'width': 120, 'depth': 80, 'height': 100}
 V2 = {'id': 'V2', 'width': 240, 'depth': 120, 'height': 140}
 V3 = {'id': 'V3', 'width': 360, 'depth': 120, 'height': 200}
 
-
+# Коробки
 P1 = {
     'id': 'P1',
     'width': 30, 'depth': 20, 'height': 15,
@@ -27,7 +28,7 @@ P4_HEAVY = {
     'weight': 30.0, 'items_per_box': 2, 'max_stack_layers': 2
 }
 
-
+# Заказы (указано количество ИЗДЕЛИЙ, алгоритм сам переведёт в коробки)
 ORDER_BASIC = {'P1': 20, 'P2': 4, 'P3': 6}
 ORDER_OVERFLOW = {'P1': 500, 'P2': 100, 'P3': 200}
 ORDER_EMPTY = {}
