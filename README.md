@@ -32,7 +32,6 @@ tests/
 ├── fixtures.py          # Эталонные данные (V1..V3, P1..P4, заказы)
 ├── test_basic.py        # Базовые сценарии упаковки
 └── test_constraints.py  # Тесты ограничений слоёв и веса
-requirements.txt
 README.md
 ```
 
