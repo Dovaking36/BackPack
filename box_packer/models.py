@@ -41,6 +41,12 @@ class Container(BaseModel):
 # 2. Модель коробки (тип упаковки)
 # ------------------------------------------------------------------
 class Box(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "id": "P1", "width": 30.0, "depth": 20.0, "height": 15.0,
+            "weight": 2.5, "items_per_box": 10, "max_stack_layers": None
+        }
+    })
     id: str = Field(..., description="Идентификатор типа коробки, например 'P1'")
     width: float = Field(..., gt=0, description="Ширина коробки, см")
     depth: float = Field(..., gt=0, description="Глубина коробки, см")
