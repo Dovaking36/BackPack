@@ -84,9 +84,9 @@ class Box(BaseModel):
 # ------------------------------------------------------------------
 class Placement(BaseModel):
     box_id: str = Field(..., description="Тип коробки")
-    quantity: int = Field(..., ge=1, description="Количество коробок этого типа, положенных в данной позиции (может быть несколько, если они размещены блоком)")
-    layer: int = Field(..., ge=1, description="Номер слоя (начиная с 1, где 1 – самый нижний)")
-    position: Position = Field(..., description="Координаты (x, y, z) в см, угла коробки, ближайшего к началу координат")
+    quantity: int = Field(..., ge=1, description="Количество коробок в данной позиции")
+    layer: int = Field(..., ge=1, description="Номер слоя (1 – самый нижний)")
+    position: Position = Field(..., description="Координаты (x, y, z) угла коробки")
     rotation: Rotation = Field(default=Rotation.R0, description="Применённый поворот")
 
     # Для упрощения в ТЗ rotation не указан явно, но полезен для алгоритма
